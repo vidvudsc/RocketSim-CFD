@@ -6,9 +6,6 @@ GPU-accelerated, axisymmetric rocket-nozzle and exhaust-plume simulation in C++2
 
 RocketSim evolves a continuous compressible flow field—there are no display particles. It models nozzle startup, expansion waves, shock structures, plume boundaries, and the surrounding atmosphere on a long rectangular domain, with live controls and reusable high-resolution baking.
 
-> [!IMPORTANT]
-> RocketSim is an exploratory CFD and visualization project. It is not validated engine-design software and must not be used as a substitute for qualified analysis or hot-fire testing.
-
 ## Highlights
 
 - Vulkan compute for live simulation, high-resolution baking, GIF generation, and long-duration validation.

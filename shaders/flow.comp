@@ -1,0 +1,186 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer InputState { float inputData[]; };
+layout(std430, binding = 1) writeonly buffer OutputState { float outputData[]; };
+layout(std430, binding = 2) readonly buffer FluidMask { uint mask[]; };
+layout(std430, binding = 3) buffer BaseState { float baseData[]; };
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    float dx;
+    float dy;
+    float xMin;
+    float yMin;
+    float gamma;
+    float gasR;
+    float ambientP;
+    float ambientT;
+    float chamberP;
+    float chamberT;
+    float chamberRadius;
+    float throatRadius;
+    float exitRadius;
+    float chamberLength;
+    float convergingLength;
+    float divergingLength;
+    float dt;
+    int secondStage;
+} pc;
+
+struct Cell { float rho; float mx; float my; float energy; float exhaust; };
+struct Prim { float rho; float u; float v; float pressure; float sound; float exhaust; };
+
+int cellIndex(int x, int y) { return y * pc.width + x; }
+bool inGrid(int x, int y) { return x >= 0 && x < pc.width && y >= 0 && y < pc.height; }
+bool fluid(int x, int y) { return inGrid(x, y) && mask[cellIndex(x, y)] != 0u; }
+float worldX(int x) { return pc.xMin + (float(x) + 0.5) * pc.dx; }
+float worldY(int y) { return pc.yMin + (float(y) + 0.5) * pc.dy; }
+
+Cell loadInput(int x, int y) {
+    int o = cellIndex(x, y) * 5;
+    return Cell(inputData[o], inputData[o+1], inputData[o+2], inputData[o+3], inputData[o+4]);
+}
+Cell loadBase(int x, int y) {
+    int o = cellIndex(x, y) * 5;
+    return Cell(baseData[o], baseData[o+1], baseData[o+2], baseData[o+3], baseData[o+4]);
+}
+void storeBase(int x, int y, Cell c) {
+    int o = cellIndex(x, y) * 5;
+    baseData[o]=c.rho; baseData[o+1]=c.mx; baseData[o+2]=c.my; baseData[o+3]=c.energy; baseData[o+4]=c.exhaust;
+}
+void storeOutput(int x, int y, Cell c) {
+    int o = cellIndex(x, y) * 5;
+    outputData[o] = c.rho; outputData[o+1] = c.mx; outputData[o+2] = c.my;
+    outputData[o+3] = c.energy; outputData[o+4] = c.exhaust;
+}
+Prim primitive(Cell c) {
+    float rho = max(c.rho, 1e-5);
+    float u = c.mx / rho, v = c.my / rho;
+    float kinetic = 0.5 * rho * (u*u + v*v);
+    float pressure = max((pc.gamma - 1.0) * (c.energy - kinetic), 30.0);
+    return Prim(rho, u, v, pressure, sqrt(pc.gamma * pressure / rho), clamp(c.exhaust / rho, 0.0, 1.0));
+}
+Cell fromPrimitive(float rho, float u, float v, float pressure, float exhaust) {
+    rho = max(rho, 1e-5);
+    return Cell(rho, rho*u, rho*v, pressure/(pc.gamma-1.0) + 0.5*rho*(u*u+v*v), rho*clamp(exhaust,0.0,1.0));
+}
+float minmod(float a, float b) { return a*b <= 0.0 ? 0.0 : sign(a)*min(abs(a),abs(b)); }
+float faceValue(float a, float b, float c, float direction) { return b + 0.5*direction*minmod(b-a,c-b); }
+
+Cell reconstruct(int x, int y, int axis, float direction) {
+    Cell center = loadInput(x,y);
+    int ax = axis == 0 ? 1 : 0, ay = axis == 1 ? 1 : 0;
+    if (!fluid(x-ax,y-ay) || !fluid(x+ax,y+ay)) return center;
+    Prim a=primitive(loadInput(x-ax,y-ay)), b=primitive(center), c=primitive(loadInput(x+ax,y+ay));
+    return fromPrimitive(faceValue(a.rho,b.rho,c.rho,direction), faceValue(a.u,b.u,c.u,direction),
+                         faceValue(a.v,b.v,c.v,direction), faceValue(a.pressure,b.pressure,c.pressure,direction),
+                         faceValue(a.exhaust,b.exhaust,c.exhaust,direction));
+}
+
+Cell physicalFlux(Cell c, Prim q, int axis) {
+    if (axis == 0) return Cell(c.mx, c.mx*q.u+q.pressure, c.my*q.u, (c.energy+q.pressure)*q.u, c.exhaust*q.u);
+    return Cell(c.my, c.mx*q.v, c.my*q.v+q.pressure, (c.energy+q.pressure)*q.v, c.exhaust*q.v);
+}
+Cell add(Cell a, Cell b) { return Cell(a.rho+b.rho,a.mx+b.mx,a.my+b.my,a.energy+b.energy,a.exhaust+b.exhaust); }
+Cell sub(Cell a, Cell b) { return Cell(a.rho-b.rho,a.mx-b.mx,a.my-b.my,a.energy-b.energy,a.exhaust-b.exhaust); }
+Cell mul(Cell a, float s) { return Cell(a.rho*s,a.mx*s,a.my*s,a.energy*s,a.exhaust*s); }
+
+Cell hllc(Cell left, Cell right, int axis) {
+    Prim l=primitive(left), r=primitive(right);
+    Cell fl=physicalFlux(left,l,axis), fr=physicalFlux(right,r,axis);
+    float unL=axis==0?l.u:l.v, unR=axis==0?r.u:r.v;
+    float sL=min(unL-l.sound,unR-r.sound), sR=max(unL+l.sound,unR+r.sound);
+    if (sL>=0.0) return fl; if (sR<=0.0) return fr;
+    float denominator=l.rho*(sL-unL)-r.rho*(sR-unR);
+    if (abs(denominator)<1e-7) {
+        float speed=max(abs(unL)+l.sound,abs(unR)+r.sound);
+        return mul(sub(add(fl,fr),mul(sub(right,left),speed)),0.5);
+    }
+    float sM=(r.pressure-l.pressure+l.rho*unL*(sL-unL)-r.rho*unR*(sR-unR))/denominator;
+    Cell state; Prim q; Cell baseFlux; float sK; float un;
+    if (sM>=0.0) { state=left; q=l; baseFlux=fl; sK=sL; un=unL; }
+    else { state=right; q=r; baseFlux=fr; sK=sR; un=unR; }
+    float rhoStar=q.rho*(sK-un)/(sK-sM);
+    float pStar=q.pressure+q.rho*(sK-un)*(sM-un);
+    Cell star;
+    if(axis==0) star=Cell(rhoStar,rhoStar*sM,rhoStar*q.v,0.0,rhoStar*q.exhaust);
+    else star=Cell(rhoStar,rhoStar*q.u,rhoStar*sM,0.0,rhoStar*q.exhaust);
+    star.energy=((sK-un)*state.energy-q.pressure*un+pStar*sM)/(sK-sM);
+    return add(baseFlux,mul(sub(star,state),sK));
+}
+
+float nozzleRadius(float x) {
+    float chamberStart=-0.10-pc.chamberLength, chamberEnd=-0.10;
+    float throatX=chamberEnd+pc.convergingLength, exitX=throatX+pc.divergingLength;
+    if(x<chamberStart) return -1.0; if(x<=chamberEnd) return pc.chamberRadius;
+    if(x<throatX) { float t=(x-chamberEnd)/max(pc.convergingLength,0.01); float s=t*t*(3.0-2.0*t); return mix(pc.chamberRadius,pc.throatRadius,s); }
+    if(x<exitX) { float t=(x-throatX)/max(pc.divergingLength,0.01); float s=t*(1.6-0.6*t); return mix(pc.throatRadius,pc.exitRadius,s); }
+    return -1.0;
+}
+
+Cell boundaryState(int x,int y,int nx,int ny,Cell center) {
+    if(!inGrid(nx,ny)) {
+        Prim q=primitive(center);
+        bool outgoing=(nx>=pc.width&&q.u>=0.0)||(nx<0&&q.u<=0.0)||(ny>=pc.height&&q.v>=0.0)||(ny<0&&q.v<=0.0);
+        if(outgoing) return center;
+        return fromPrimitive(pc.ambientP/(pc.gasR*pc.ambientT),0.0,0.0,pc.ambientP,0.0);
+    }
+    Prim q=primitive(center);
+    float sx=worldX(nx), sy=worldY(ny), radius=nozzleRadius(sx);
+    float chamberStart=-0.10-pc.chamberLength;
+    bool backWall=abs(sx-chamberStart)<3.0*pc.dx && abs(sy)<pc.chamberRadius+3.0*pc.dy;
+    if(backWall || radius<=0.0) { if(nx!=x)q.u=-q.u; if(ny!=y)q.v=-q.v; }
+    else {
+        float r0=nozzleRadius(sx-pc.dx), r1=nozzleRadius(sx+pc.dx);
+        float drdx=(r0>0.0&&r1>0.0)?(r1-r0)/(2.0*pc.dx):0.0;
+        vec2 n=normalize(vec2(-drdx, sy<0.0?-1.0:1.0));
+        vec2 velocity=vec2(q.u,q.v)-2.0*dot(vec2(q.u,q.v),n)*n; q.u=velocity.x; q.v=velocity.y;
+    }
+    return fromPrimitive(q.rho,q.u,q.v,q.pressure,q.exhaust);
+}
+
+Cell faceFlux(int lx,int ly,int rx,int ry,int axis) {
+    bool hasL=fluid(lx,ly), hasR=fluid(rx,ry);
+    if(hasL&&hasR) return hllc(reconstruct(lx,ly,axis,1.0),reconstruct(rx,ry,axis,-1.0),axis);
+    if(hasL) { Cell l=loadInput(lx,ly); return hllc(l,boundaryState(lx,ly,rx,ry,l),axis); }
+    if(hasR) { Cell r=loadInput(rx,ry); return hllc(boundaryState(rx,ry,lx,ly,r),r,axis); }
+    return Cell(0,0,0,0,0);
+}
+
+void main() {
+    int x=int(gl_GlobalInvocationID.x), y=int(gl_GlobalInvocationID.y);
+    if(!inGrid(x,y) || !fluid(x,y)) return;
+    Cell c=loadInput(x,y);
+    if(pc.secondStage==0) storeBase(x,y,c);
+    Cell fxL=faceFlux(x-1,y,x,y,0), fxR=faceFlux(x,y,x+1,y,0);
+    int lowerCenter=pc.height/2-1, upperCenter=pc.height/2;
+    Cell fyB,fyT;
+    if(y==upperCenter){Cell reflected=fromPrimitive(primitive(c).rho,primitive(c).u,-primitive(c).v,primitive(c).pressure,primitive(c).exhaust);fyB=hllc(reflected,c,1);}
+    else fyB=faceFlux(x,y-1,x,y,1);
+    if(y==lowerCenter){Cell reflected=fromPrimitive(primitive(c).rho,primitive(c).u,-primitive(c).v,primitive(c).pressure,primitive(c).exhaust);fyT=hllc(c,reflected,1);}
+    else fyT=faceFlux(x,y,x,y+1,1);
+    Cell n=sub(c,mul(add(mul(sub(fxR,fxL),1.0/pc.dx),mul(sub(fyT,fyB),1.0/pc.dy)),pc.dt));
+    // Axisymmetric Euler geometric terms. The two displayed halves are
+    // independent radial solves sharing a reflective r=0 centerline.
+    Prim qc=primitive(c);float side=worldY(y)>=0.0?1.0:-1.0;
+    float radius=max(abs(worldY(y)),0.5*pc.dy);float radialVelocity=side*qc.v;
+    n.rho-=pc.dt*c.rho*radialVelocity/radius;
+    n.mx-=pc.dt*c.mx*radialVelocity/radius;
+    n.my-=pc.dt*side*c.rho*radialVelocity*radialVelocity/radius;
+    n.energy-=pc.dt*(c.energy+qc.pressure)*radialVelocity/radius;
+    n.exhaust-=pc.dt*c.exhaust*radialVelocity/radius;
+    if(isnan(n.rho)||isinf(n.rho)||isnan(n.energy)||isinf(n.energy)||n.rho<1e-5) n=c;
+    float kinetic=0.5*(n.mx*n.mx+n.my*n.my)/max(n.rho,1e-5);
+    n.energy=max(n.energy,kinetic+30.0/(pc.gamma-1.0)); n.exhaust=clamp(n.exhaust,0.0,n.rho);
+    float chamberStart=-0.10-pc.chamberLength;
+    float wallThickness=min(1.55*max(pc.dx,pc.dy),0.22*pc.throatRadius);
+    float wx=worldX(x);
+    bool reservoir=wx>chamberStart+2.0*wallThickness && wx<chamberStart+2.0*wallThickness+4.0*pc.dx &&
+                   abs(worldY(y))<pc.chamberRadius-2.0*wallThickness;
+    if(reservoir) n=fromPrimitive(pc.chamberP/(pc.gasR*pc.chamberT),4.0,0.0,pc.chamberP,1.0);
+    if(pc.secondStage!=0) n=mul(add(loadBase(x,y),n),0.5);
+    storeOutput(x,y,n);
+}

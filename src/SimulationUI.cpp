@@ -324,6 +324,27 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
         ImGui::SliderFloat("Heat capacity ratio", &p.gamma, 1.10f, 1.40f, "%.3f");
         ImGui::TextDisabled("Reset starts the chamber ambient; the head reservoir supplies hot gas.");
 
+        ImGui::SeparatorText("Ignition transient");
+        bool ignitionChanged = ImGui::Checkbox("Hard-start transient", &p.hardStartEnabled);
+        if (p.hardStartEnabled) {
+            ignitionChanged |= ImGui::SliderFloat("Ignition delay", &p.ignitionDelayMs,
+                                                   0.0f, 20.0f, "%.2f ms");
+            ignitionChanged |= ImGui::SliderFloat("Pressure rise", &p.ignitionRiseMs,
+                                                   0.05f, 2.0f, "%.2f ms");
+            ignitionChanged |= ImGui::SliderFloat("Peak pressure", &p.hardStartPressureRatio,
+                                                   1.0f, 5.0f, "%.2fx nominal");
+            ignitionChanged |= ImGui::SliderFloat("Spike decay", &p.hardStartDecayMs,
+                                                   0.1f, 10.0f, "%.2f ms");
+            ignitionChanged |= ImGui::SliderFloat("Pre-ignition feed", &p.preIgnitionPressureFraction,
+                                                   0.02f, 0.50f, "%.2fx nominal");
+            const Parameters currentReservoir = transientReservoirParameters(p, d.simulationTimeMs);
+            ImGui::Text("Current reservoir  %.2f MPa | %.0f K",
+                        currentReservoir.chamberPressureMPa, currentReservoir.chamberTemperatureK);
+            if (ImGui::Button("Restart hard start", ImVec2(-1.0f, 0.0f))) actions.reset = true;
+            ImGui::TextDisabled("Prescribed ignition boundary transient; chemistry and injector dynamics are not modeled.");
+        }
+        actions.reset |= ignitionChanged;
+
         ImGui::SeparatorText("Nozzle");
         actions.geometryChanged |= ImGui::SliderFloat("Chamber radius", &p.chamberRadiusM, 0.25f, 0.80f, "%.3f m");
         actions.geometryChanged |= ImGui::SliderFloat("Throat radius", &p.throatRadiusM, 0.06f, 0.28f, "%.3f m");

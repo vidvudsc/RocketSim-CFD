@@ -27,6 +27,29 @@ std::array<float, 3> blueRed(float t) {
 }
 } // namespace
 
+Parameters transientReservoirParameters(const Parameters& requested, float simulationTimeMs) {
+    if (!requested.hardStartEnabled) return requested;
+    Parameters effective = requested;
+    const float preIgnition = std::clamp(requested.preIgnitionPressureFraction, 0.01f, 0.60f);
+    const float elapsed = simulationTimeMs - std::max(requested.ignitionDelayMs, 0.0f);
+    if (elapsed <= 0.0f) {
+        effective.chamberPressureMPa = requested.chamberPressureMPa * preIgnition;
+        effective.chamberTemperatureK = requested.ambientTemperatureK;
+        return effective;
+    }
+    const float riseTime = std::max(requested.ignitionRiseMs, 0.02f);
+    const float normalized = std::clamp(elapsed / riseTime, 0.0f, 1.0f);
+    const float ramp = normalized * normalized * (3.0f - 2.0f * normalized);
+    const float pulse = elapsed <= riseTime ? ramp :
+        std::exp(-(elapsed - riseTime) / std::max(requested.hardStartDecayMs, 0.05f));
+    const float pressureRatio = std::max(requested.hardStartPressureRatio, 1.0f);
+    effective.chamberPressureMPa = requested.chamberPressureMPa *
+        (preIgnition + (1.0f - preIgnition) * ramp + (pressureRatio - 1.0f) * pulse);
+    effective.chamberTemperatureK = requested.ambientTemperatureK +
+        (requested.chamberTemperatureK - requested.ambientTemperatureK) * ramp;
+    return effective;
+}
+
 FlowSolver::FlowSolver(int width, int height)
     : width_(width), height_(height), dx_((xMax_ - xMin_) / width), dy_((yMax_ - yMin_) / height),
       cells_(static_cast<size_t>(width * height)), next_(cells_.size()),
@@ -144,9 +167,11 @@ void FlowSolver::rebuildGeometry(const Parameters& p) {
 void FlowSolver::reset(const Parameters& p) {
     activeParameters_ = p;
     rebuildGeometry(p);
+    const Parameters reservoir = transientReservoirParameters(p, 0.0f);
     const float gasR = kRu / (p.molarMassGPerMol * 0.001f);
     const float rhoAmbient = p.ambientPressureKPa * 1000.0f / (gasR * p.ambientTemperatureK);
-    const float rhoChamber = p.chamberPressureMPa * 1.0e6f / (gasR * p.chamberTemperatureK);
+    const float rhoChamber = reservoir.chamberPressureMPa * 1.0e6f /
+                             (gasR * reservoir.chamberTemperatureK);
     const float chamberStart = -0.10f - p.chamberLengthM;
     const float wallThickness = std::min(1.55f * std::max(dx_, dy_), 0.22f * p.throatRadiusM);
     for (int y = 0; y < height_; ++y) {
@@ -159,7 +184,7 @@ void FlowSolver::reset(const Parameters& p) {
                 cells_[index(x, y)] = {};
             } else if (injectorPlenum) {
                 cells_[index(x, y)] = stateFromPrimitive(rhoChamber, 4.0f, 0.0f,
-                                                         p.chamberPressureMPa * 1.0e6f, 1.0f);
+                                                         reservoir.chamberPressureMPa * 1.0e6f, 1.0f);
             } else {
                 cells_[index(x, y)] = stateFromPrimitive(rhoAmbient, 0.0f, 0.0f, p.ambientPressureKPa * 1000.0f, 0.0f);
             }
@@ -235,8 +260,13 @@ void FlowSolver::advanceGpuSteps(int count, const Parameters& parameters) {
     activeParameters_ = parameters;
     int remaining = std::max(count, 0);
     while (remaining > 0) {
-        const int chunk = std::min(remaining, 256);
-        const float dt = gpu_->advance(chunk, parameters);
+        const float resolvedTransientEnd = parameters.ignitionDelayMs + parameters.ignitionRiseMs +
+                                           6.0f * parameters.hardStartDecayMs;
+        const bool resolvingIgnition = parameters.hardStartEnabled &&
+                                        diagnostics_.simulationTimeMs < resolvedTransientEnd;
+        const int chunk = std::min(remaining, resolvingIgnition ? 64 : 256);
+        const Parameters reservoir = transientReservoirParameters(parameters, diagnostics_.simulationTimeMs);
+        const float dt = gpu_->advance(chunk, reservoir);
         diagnostics_.simulationTimeMs += dt * chunk * 1000.0f;
         diagnostics_.iteration += chunk;
         remaining -= chunk;
@@ -247,6 +277,7 @@ void FlowSolver::advanceGpuSteps(int count, const Parameters& parameters) {
         cells_[i] = {packed[i*5],packed[i*5+1],packed[i*5+2],packed[i*5+3],packed[i*5+4]};
     }
     next_ = cells_;
+    activeParameters_ = parameters;
 }
 
 FlowSolver::Cell FlowSolver::flux(const Cell& c, const Primitive& q, int axis) const {
@@ -454,6 +485,8 @@ void FlowSolver::computeFluxRows(int yBegin, int yEnd) {
 }
 
 void FlowSolver::updateRows(float dt, int yBegin, int yEnd) {
+    const Parameters reservoirParameters = transientReservoirParameters(activeParameters_,
+                                                                         diagnostics_.simulationTimeMs);
     for (int y = yBegin; y < yEnd; ++y) {
         for (int x = 0; x < width_; ++x) {
             const int i = index(x, y);
@@ -486,11 +519,11 @@ void FlowSolver::updateRows(float dt, int yBegin, int yEnd) {
                                    wx < chamberStart + 2.0f * wallThickness + 4.0f * dx_ &&
                                    std::abs(worldY(y)) < activeParameters_.chamberRadiusM - 2.0f * wallThickness;
             if (reservoir) {
-                const float gasR = kRu / (activeParameters_.molarMassGPerMol * 0.001f);
-                const float rho = activeParameters_.chamberPressureMPa * 1.0e6f /
-                                  (gasR * activeParameters_.chamberTemperatureK);
+                const float gasR = kRu / (reservoirParameters.molarMassGPerMol * 0.001f);
+                const float rho = reservoirParameters.chamberPressureMPa * 1.0e6f /
+                                  (gasR * reservoirParameters.chamberTemperatureK);
                 n = stateFromPrimitive(rho, 4.0f, 0.0f,
-                                       activeParameters_.chamberPressureMPa * 1.0e6f, 1.0f);
+                                       reservoirParameters.chamberPressureMPa * 1.0e6f, 1.0f);
             }
             if (secondRungeKuttaStage_) {
                 const Cell& original = stageBase_[i];

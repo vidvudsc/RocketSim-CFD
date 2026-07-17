@@ -5,6 +5,17 @@
 
 int main() {
     rocket::Parameters parameters;
+    rocket::Parameters hardStart = parameters;
+    hardStart.hardStartEnabled = true;
+    const rocket::Parameters beforeIgnition = rocket::transientReservoirParameters(hardStart, 0.0f);
+    const rocket::Parameters atPressurePeak = rocket::transientReservoirParameters(
+        hardStart, hardStart.ignitionDelayMs + hardStart.ignitionRiseMs);
+    const rocket::Parameters afterDecay = rocket::transientReservoirParameters(
+        hardStart, hardStart.ignitionDelayMs + hardStart.ignitionRiseMs + 20.0f * hardStart.hardStartDecayMs);
+    const bool hardStartProfile = beforeIgnition.chamberPressureMPa < parameters.chamberPressureMPa &&
+        std::abs(atPressurePeak.chamberPressureMPa - parameters.chamberPressureMPa *
+                 hardStart.hardStartPressureRatio) < 1.0e-4f &&
+        std::abs(afterDecay.chamberPressureMPa - parameters.chamberPressureMPa) < 1.0e-3f;
     rocket::FlowSolver solver(180, 80);
     float initialNozzleExhaust = 0.0f;
     for (int y = 0; y < solver.height(); ++y) {
@@ -51,9 +62,13 @@ int main() {
     std::cout << "initialNozzleExhaust=" << initialNozzleExhaust
               << " nozzleStartsEmpty=" << nozzleStartsEmpty << '\n';
     std::cout << "leakLocation=(" << leakX << ", " << leakY << ")\n";
+    std::cout << "hardStartPressureMPa=[" << beforeIgnition.chamberPressureMPa << ", "
+              << atPressurePeak.chamberPressureMPa << ", " << afterDecay.chamberPressureMPa
+              << "] profile=" << hardStartProfile << '\n';
     rocket::FlowSolver detailedSolver;
     detailedSolver.step(1.0f / 60.0f, parameters);
     std::cout << "detailedGrid=" << detailedSolver.width() << 'x' << detailedSolver.height()
               << " frameBudgetMs=" << detailedSolver.diagnostics().stepMilliseconds << '\n';
-    return finite && physicalBounds && sustainedFeed && sealedChamber && nozzleStartsEmpty ? 0 : 1;
+    return finite && physicalBounds && sustainedFeed && sealedChamber && nozzleStartsEmpty &&
+           hardStartProfile ? 0 : 1;
 }

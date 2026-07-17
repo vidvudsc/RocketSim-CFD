@@ -462,7 +462,11 @@ int main(int, char**)
                a.throatRadiusM == b.throatRadiusM && a.exitRadiusM == b.exitRadiusM &&
                a.chamberLengthM == b.chamberLengthM && a.convergingLengthM == b.convergingLengthM &&
                a.divergingLengthM == b.divergingLengthM && a.cfl == b.cfl &&
-               a.timeScale == b.timeScale;
+               a.timeScale == b.timeScale && a.hardStartEnabled == b.hardStartEnabled &&
+               a.ignitionDelayMs == b.ignitionDelayMs && a.ignitionRiseMs == b.ignitionRiseMs &&
+               a.hardStartPressureRatio == b.hardStartPressureRatio &&
+               a.hardStartDecayMs == b.hardStartDecayMs &&
+               a.preIgnitionPressureFraction == b.preIgnitionPressureFraction;
     };
     liveHistory.push_back(solver.captureSnapshot());
     ImVec4 clear_color = ImVec4(0.01f, 0.015f, 0.024f, 1.00f);

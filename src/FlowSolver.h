@@ -32,7 +32,16 @@ struct Parameters {
     float cfl = 0.34f;
     float timeScale = 1.0f;
     int liveStepBudget = 3;
+    bool hardStartEnabled = false;
+    float ignitionDelayMs = 4.0f;
+    float ignitionRiseMs = 0.35f;
+    float hardStartPressureRatio = 2.2f;
+    float hardStartDecayMs = 2.5f;
+    float preIgnitionPressureFraction = 0.12f;
 };
+
+[[nodiscard]] Parameters transientReservoirParameters(const Parameters& requested,
+                                                       float simulationTimeMs);
 
 struct Diagnostics {
     float simulationTimeMs = 0.0f;

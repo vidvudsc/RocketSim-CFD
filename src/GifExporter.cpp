@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -209,19 +210,35 @@ bool GifExporter::startFromBake(std::shared_ptr<const BakeResult> bake, GifExpor
         setMessage("Encoding baked frame range " + std::to_string(startFrame) + " - " +
                    std::to_string(endFrame) + "...", paths);
 
-        bool failed = false;
         const int outputWidth = 1536;
         const int outputHeight = std::max(64, static_cast<int>(std::round(outputWidth / bake->worldAspect)));
-        for (size_t i = 0; i < selected.size() && !stop.stop_requested(); ++i) {
+        const int selectedFrameCount = endFrame - startFrame + 1;
+        auto encodeField = [&](size_t i) {
             std::ostringstream command;
-            command << "ffmpeg -hide_banner -loglevel error -y -i " << shellQuote(selected[i]->videoPath)
-                    << " -filter_complex \"select='between(n\\," << startFrame << "\\," << endFrame
-                    << ")',setpts=N/(" << settings.playbackFps << "*TB),scale=" << outputWidth << ':'
+            command << "ffmpeg -hide_banner -loglevel error -y -ss " << std::fixed << std::setprecision(6)
+                    << static_cast<double>(startFrame) / 30.0 << " -t "
+                    << static_cast<double>(selectedFrameCount) / 30.0 << " -i "
+                    << shellQuote(selected[i]->videoPath)
+                    << " -filter_complex \"setpts=N/(" << settings.playbackFps << "*TB),scale=" << outputWidth << ':'
                     << outputHeight << ":flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256[p];"
                        "[s1][p]paletteuse=dither=sierra2_4a\" -r " << settings.playbackFps
                     << " -loop 0 " << shellQuote(paths[i]);
-            failed |= std::system(command.str().c_str()) != 0;
-            progress_.store(static_cast<float>(i + 1) / selected.size());
+            return std::system(command.str().c_str()) != 0;
+        };
+
+        bool failed = false;
+        size_t completed = 0;
+        constexpr size_t parallelEncoders = 2;
+        for (size_t batch = 0; batch < selected.size() && !stop.stop_requested(); batch += parallelEncoders) {
+            std::vector<std::future<bool>> jobs;
+            const size_t batchEnd = std::min(selected.size(), batch + parallelEncoders);
+            for (size_t i = batch; i < batchEnd; ++i)
+                jobs.push_back(std::async(std::launch::async, encodeField, i));
+            for (std::future<bool>& job : jobs) {
+                failed |= job.get();
+                ++completed;
+                progress_.store(static_cast<float>(completed) / selected.size());
+            }
         }
         running_.store(false);
         if (stop.stop_requested()) setMessage("Baked GIF export cancelled", paths);

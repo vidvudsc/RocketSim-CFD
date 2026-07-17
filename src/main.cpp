@@ -547,9 +547,11 @@ int main(int, char**)
         }
         if (actions.recoverBake)
             bakeManager.recoverLatest(parameters, actions.recoveryCaptureEverySteps);
-        if (actions.exportBakedGif)
+        if (actions.exportBakedGif) {
+            solver.setPaused(true);
             gifExporter.startFromBake(bakeManager.status().result, actions.gifSettings,
                                       actions.bakedStartFrame, actions.bakedEndFrame);
+        }
 
         // Rendering
         ImGui::Render();

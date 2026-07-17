@@ -346,21 +346,20 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
             }
             if ((field % 2) == 0 && field + 1 < IM_ARRAYSIZE(fieldLabels)) ImGui::SameLine(190.0f);
         }
-        if (ImGui::Button("All fields")) outputFieldMask = (1u << IM_ARRAYSIZE(fieldLabels)) - 1u;
-        ImGui::SameLine();
-        if (ImGui::Button("Current view only")) outputFieldMask = 1u << static_cast<uint32_t>(view);
     }
 
     bakeSettings.fieldMask = outputFieldMask;
     gifSettings.fieldMask = outputFieldMask;
 
     if (ImGui::CollapsingHeader("Bake timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("Bake CFD steps", &bakeSettings.totalSteps, 500, 50000);
-        ImGui::SliderInt("Capture interval", &bakeSettings.captureEverySteps, 5, 250, "%d steps/frame");
         static const char* resolutionLabels[] = {"1x  (768 x 288)", "2x  (1536 x 576)", "3x  (2304 x 864)"};
         int scaleIndex = bakeSettings.resolutionScale - 1;
         if (ImGui::Combo("Bake resolution", &scaleIndex, resolutionLabels, IM_ARRAYSIZE(resolutionLabels)))
             bakeSettings.resolutionScale = scaleIndex + 1;
+        const int maximumBakeSteps = bakeSettings.resolutionScale == 3 ? 200000 : 100000;
+        bakeSettings.totalSteps = std::min(bakeSettings.totalSteps, maximumBakeSteps);
+        ImGui::SliderInt("Bake CFD steps", &bakeSettings.totalSteps, 500, maximumBakeSteps);
+        ImGui::SliderInt("Capture interval", &bakeSettings.captureEverySteps, 5, 250, "%d steps/frame");
         const int estimatedFrames = (bakeSettings.totalSteps + bakeSettings.captureEverySteps - 1) /
                                     bakeSettings.captureEverySteps;
         int bakeFieldCount = 0;
@@ -425,6 +424,9 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
                                                gifSettings.solverStepsPerFrame + 1);
             ImGui::TextDisabled("CFD steps %d - %d | about %.2f seconds", firstStep, lastStep,
                                 static_cast<float>(frames) / gifSettings.playbackFps);
+            ImGui::TextDisabled("Rolling history: %d checkpoints spanning %d CFD steps",
+                                static_cast<int>(liveHistorySteps.size()),
+                                liveHistorySteps.back() - liveHistorySteps.front());
         } else {
             ImGui::TextDisabled("Run the simulation to build a rolling past timeline.");
         }

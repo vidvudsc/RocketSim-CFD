@@ -18,7 +18,7 @@ std::string shellQuote(const std::string& value) {
     return out + "'";
 }
 
-std::string timestampedStem() {
+std::string exportDirectory(const char* kind) {
     const auto now = std::chrono::system_clock::now();
     const std::time_t time = std::chrono::system_clock::to_time_t(now);
     std::tm local{};
@@ -27,11 +27,15 @@ std::string timestampedStem() {
 #else
     localtime_r(&time, &local);
 #endif
-    std::ostringstream name;
-    name << "rocketsim_" << std::put_time(&local, "%Y%m%d_%H%M%S");
-    const std::filesystem::path directory = std::filesystem::current_path() / "exports";
+    std::ostringstream baseName;
+    baseName << "rocketsim_" << std::put_time(&local, "%Y%m%d_%H%M%S") << '_' << kind;
+    const std::filesystem::path root = std::filesystem::current_path() / "exports";
+    std::filesystem::create_directories(root);
+    std::filesystem::path directory = root / baseName.str();
+    for (int suffix = 2; std::filesystem::exists(directory); ++suffix)
+        directory = root / (baseName.str() + "_" + std::to_string(suffix));
     std::filesystem::create_directories(directory);
-    return (directory / name.str()).string();
+    return directory.string();
 }
 
 const char* fieldSlug(FieldView view) {
@@ -96,7 +100,7 @@ bool GifExporter::startFromPast(const SolverSnapshot& source, int endIteration,
             return;
         }
 
-        const std::string stem = timestampedStem();
+        const std::string directory = exportDirectory("live_history");
         const int width = exportSolver.width();
         const int height = exportSolver.height();
         const float worldAspect = (exportSolver.worldXMax() - exportSolver.worldXMin()) /
@@ -118,7 +122,8 @@ bool GifExporter::startFromPast(const SolverSnapshot& source, int endIteration,
         for (uint32_t field = 0; field < 7; ++field) {
             if ((settings.fieldMask & (1u << field)) == 0) continue;
             const FieldView selected = static_cast<FieldView>(field);
-            const std::string path = stem + "_" + fieldSlug(selected) + ".gif";
+            const std::string path = (std::filesystem::path(directory) /
+                                      (std::string(fieldSlug(selected)) + ".gif")).string();
             std::ostringstream command;
             command << "ffmpeg -hide_banner -loglevel error -y -f rawvideo -pixel_format rgb24 -video_size "
                     << width << 'x' << height << " -framerate " << settings.playbackFps
@@ -192,13 +197,14 @@ bool GifExporter::startFromBake(std::shared_ptr<const BakeResult> bake, GifExpor
     setMessage("Exporting selected baked timeline...");
 
     worker_ = std::jthread([this, bake = std::move(bake), settings, startFrame, endFrame](std::stop_token stop) {
-        const std::string stem = timestampedStem() + "_baked";
+        const std::string directory = exportDirectory("baked");
         std::vector<const BakedField*> selected;
         std::vector<std::string> paths;
         for (const BakedField& field : bake->fields) {
             if ((settings.fieldMask & (1u << static_cast<uint32_t>(field.view))) == 0) continue;
             selected.push_back(&field);
-            paths.push_back(stem + "_" + fieldSlug(field.view) + ".gif");
+            paths.push_back((std::filesystem::path(directory) /
+                             (std::string(fieldSlug(field.view)) + ".gif")).string());
         }
         setMessage("Encoding baked frame range " + std::to_string(startFrame) + " - " +
                    std::to_string(endFrame) + "...", paths);

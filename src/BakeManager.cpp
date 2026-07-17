@@ -95,7 +95,7 @@ BakeStatus BakeManager::status() const {
 }
 
 bool BakeManager::start(const Parameters& parameters, BakeSettings settings) {
-    settings.totalSteps = std::clamp(settings.totalSteps, 100, 50000);
+    settings.totalSteps = std::clamp(settings.totalSteps, 100, 200000);
     settings.captureEverySteps = std::clamp(settings.captureEverySteps, 1, 500);
     settings.resolutionScale = std::clamp(settings.resolutionScale, 1, 3);
     settings.fieldMask &= (1u << 7u) - 1u;

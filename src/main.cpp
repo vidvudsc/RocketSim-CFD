@@ -448,8 +448,10 @@ int main(int, char**)
     rocket::BakeManager bakeManager;
     rocket::FieldView fieldView = rocket::FieldView::Schlieren;
     std::deque<rocket::SolverSnapshot> liveHistory;
-    constexpr int historyCaptureInterval = 120;
-    constexpr size_t maximumHistoryFrames = 48;
+    // Sparse checkpoints keep more than 50k steps available without retaining
+    // every full 768x288 state in memory. GIF export replays between them.
+    constexpr int historyCaptureInterval = 800;
+    constexpr size_t maximumHistoryFrames = 64;
     rocket::Parameters historyParameters = parameters;
     auto sameParameters = [](const rocket::Parameters& a, const rocket::Parameters& b) {
         return a.chamberPressureMPa == b.chamberPressureMPa &&

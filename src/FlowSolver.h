@@ -48,6 +48,15 @@ struct Diagnostics {
     int iteration = 0;
 };
 
+struct SolverSnapshot {
+    int width = 0;
+    int height = 0;
+    Parameters parameters{};
+    Diagnostics diagnostics{};
+    std::vector<float> conserved;
+    std::vector<uint8_t> fluidMask;
+};
+
 class FlowSolver {
 public:
     FlowSolver(int width = 768, int height = 288);
@@ -61,6 +70,8 @@ public:
     void advanceSteps(int count, const Parameters& parameters);
     void enableGpu(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, uint32_t queueFamily);
     void disableGpu();
+    [[nodiscard]] SolverSnapshot captureSnapshot() const;
+    bool restoreSnapshot(const SolverSnapshot& snapshot);
     [[nodiscard]] bool gpuEnabled() const { return static_cast<bool>(gpu_); }
 
     [[nodiscard]] int width() const { return width_; }
@@ -138,6 +149,7 @@ private:
     void startWorkers();
     void advance(float dt);
     void updateDiagnostics();
+    void uploadGpuState();
     void advanceGpuSteps(int count, const Parameters& parameters);
     [[nodiscard]] float stableTimeStep() const;
 };

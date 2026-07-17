@@ -7,14 +7,16 @@
 
 int main() {
     rocket::GifExporter exporter;
+    rocket::Parameters parameters;
+    rocket::FlowSolver currentSolver(192, 72);
+    currentSolver.advanceSteps(12, parameters);
     rocket::GifExportSettings settings;
     settings.playbackFps = 8;
     settings.durationSeconds = 1;
     settings.solverStepsPerFrame = 12;
-    settings.warmupSteps = 200;
     settings.fieldMask = (1u << static_cast<uint32_t>(rocket::FieldView::Schlieren)) |
                          (1u << static_cast<uint32_t>(rocket::FieldView::Mach));
-    if (!exporter.start(rocket::Parameters{}, settings)) return 1;
+    if (!exporter.startFromCurrent(currentSolver, parameters, settings)) return 1;
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     rocket::GifExportStatus status;

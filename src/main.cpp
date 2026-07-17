@@ -494,7 +494,7 @@ int main(int, char**)
             solver.advanceSteps(5000, parameters);
         if (actions.exportGif) {
             solver.setPaused(true);
-            gifExporter.start(parameters, actions.gifSettings);
+            gifExporter.startFromCurrent(solver, parameters, actions.gifSettings);
         }
         if (actions.startBake) {
             solver.setPaused(true);

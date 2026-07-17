@@ -15,6 +15,62 @@ void metric(const char* label, const char* value, ImVec4 color = ImVec4(0.76f, 0
     ImGui::TableSetColumnIndex(1);
     ImGui::TextColored(color, "%s", value);
 }
+
+bool rangeSliderInt(const char* label, int* first, int* last, int maximum) {
+    maximum = std::max(maximum, 0);
+    *first = std::clamp(*first, 0, maximum);
+    *last = std::clamp(*last, *first, maximum);
+    ImGui::TextUnformatted(label);
+    const ImGuiID id = ImGui::GetID(label);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = std::max(ImGui::GetContentRegionAvail().x, 40.0f);
+    constexpr float height = 24.0f;
+    ImGui::PushID(label);
+    ImGui::InvisibleButton("##range", ImVec2(width, height));
+    ImGui::PopID();
+
+    const float left = origin.x + 10.0f;
+    const float right = origin.x + width - 10.0f;
+    const float centerY = origin.y + height * 0.5f;
+    auto position = [&](int value) {
+        return left + (right - left) * static_cast<float>(value) / std::max(maximum, 1);
+    };
+    static ImGuiID activeRange = 0;
+    static bool draggingLast = false;
+    if (ImGui::IsItemClicked()) {
+        activeRange = id;
+        draggingLast = std::abs(ImGui::GetIO().MousePos.x - position(*last)) <
+                       std::abs(ImGui::GetIO().MousePos.x - position(*first));
+    }
+
+    bool changed = false;
+    if (activeRange == id && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const float t = std::clamp((ImGui::GetIO().MousePos.x - left) / std::max(right - left, 1.0f), 0.0f, 1.0f);
+        const int value = static_cast<int>(std::round(t * maximum));
+        if (draggingLast) {
+            const int next = std::max(value, *first);
+            changed |= next != *last;
+            *last = next;
+        } else {
+            const int next = std::min(value, *last);
+            changed |= next != *first;
+            *first = next;
+        }
+    }
+    if (activeRange == id && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) activeRange = 0;
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddLine(ImVec2(left, centerY), ImVec2(right, centerY),
+                  ImGui::GetColorU32(ImGuiCol_FrameBg), 7.0f);
+    draw->AddLine(ImVec2(position(*first), centerY), ImVec2(position(*last), centerY),
+                  ImGui::GetColorU32(ImGuiCol_SliderGrab), 7.0f);
+    draw->AddCircleFilled(ImVec2(position(*first), centerY), 7.0f,
+                          ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
+    draw->AddCircleFilled(ImVec2(position(*last), centerY), 7.0f,
+                          ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
+    ImGui::Text("Frames %d - %d", *first, *last);
+    return changed;
+}
 } // namespace
 
 void applyTheme(float scale) {
@@ -61,6 +117,8 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
     UiActions actions;
     static GifExportSettings gifSettings;
     static BakeSettings bakeSettings;
+    static uint32_t outputFieldMask = (1u << static_cast<uint32_t>(FieldView::Schlieren)) |
+                                      (1u << static_cast<uint32_t>(FieldView::Mach));
     static int recoveryCaptureEverySteps = 40;
     static bool showBakedTimeline = false;
     static int bakedFrame = 0;
@@ -263,22 +321,31 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
         ImGui::TextDisabled("Geometry edits reset the flow automatically.");
     }
 
-    if (ImGui::CollapsingHeader("High-resolution bake", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Output fields", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("Each selected field produces its own synchronized GIF.");
+        for (int field = 0; field < IM_ARRAYSIZE(fieldLabels); ++field) {
+            bool enabled = (outputFieldMask & (1u << field)) != 0;
+            if (ImGui::Checkbox((std::string(fieldLabels[field]) + "##output").c_str(), &enabled)) {
+                if (enabled) outputFieldMask |= 1u << field;
+                else outputFieldMask &= ~(1u << field);
+            }
+            if ((field % 2) == 0 && field + 1 < IM_ARRAYSIZE(fieldLabels)) ImGui::SameLine(190.0f);
+        }
+        if (ImGui::Button("All fields")) outputFieldMask = (1u << IM_ARRAYSIZE(fieldLabels)) - 1u;
+        ImGui::SameLine();
+        if (ImGui::Button("Current view only")) outputFieldMask = 1u << static_cast<uint32_t>(view);
+    }
+
+    bakeSettings.fieldMask = outputFieldMask;
+    gifSettings.fieldMask = outputFieldMask;
+
+    if (ImGui::CollapsingHeader("Bake timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderInt("Bake CFD steps", &bakeSettings.totalSteps, 500, 50000);
         ImGui::SliderInt("Capture interval", &bakeSettings.captureEverySteps, 5, 250, "%d steps/frame");
         static const char* resolutionLabels[] = {"1x  (768 x 288)", "2x  (1536 x 576)", "3x  (2304 x 864)"};
         int scaleIndex = bakeSettings.resolutionScale - 1;
         if (ImGui::Combo("Bake resolution", &scaleIndex, resolutionLabels, IM_ARRAYSIZE(resolutionLabels)))
             bakeSettings.resolutionScale = scaleIndex + 1;
-        ImGui::Text("Bake fields");
-        for (int field = 0; field < IM_ARRAYSIZE(fieldLabels); ++field) {
-            bool enabled = (bakeSettings.fieldMask & (1u << field)) != 0;
-            if (ImGui::Checkbox((std::string(fieldLabels[field]) + "##bake").c_str(), &enabled)) {
-                if (enabled) bakeSettings.fieldMask |= 1u << field;
-                else bakeSettings.fieldMask &= ~(1u << field);
-            }
-            if ((field % 2) == 0 && field + 1 < IM_ARRAYSIZE(fieldLabels)) ImGui::SameLine(190.0f);
-        }
         const int estimatedFrames = (bakeSettings.totalSteps + bakeSettings.captureEverySteps - 1) /
                                     bakeSettings.captureEverySteps;
         int bakeFieldCount = 0;
@@ -323,16 +390,8 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
             bakedFrame = std::clamp(bakedFrame, 0, bakeStatus.result->frameCount - 1);
             ImGui::Text("Frame %d | CFD step %d", bakedFrame,
                         bakeStatus.result->cfdSteps[static_cast<size_t>(bakedFrame)]);
-            if (ImGui::Button("Set range start = current")) {
-                bakedStartFrame = bakedFrame;
-                bakedEndFrame = std::max(bakedEndFrame, bakedStartFrame);
-            }
-            if (ImGui::Button("Set range end = current")) {
-                bakedEndFrame = bakedFrame;
-                bakedStartFrame = std::min(bakedStartFrame, bakedEndFrame);
-            }
-            ImGui::SliderInt("Export start frame", &bakedStartFrame, 0, bakeStatus.result->frameCount - 1);
-            ImGui::SliderInt("Export end frame", &bakedEndFrame, bakedStartFrame, bakeStatus.result->frameCount - 1);
+            rangeSliderInt("GIF export range", &bakedStartFrame, &bakedEndFrame,
+                           bakeStatus.result->frameCount - 1);
             ImGui::TextDisabled("Mouse wheel over the viewport also scrubs frames.");
         }
     }
@@ -341,31 +400,14 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
         ImGui::SliderInt("Playback FPS", &gifSettings.playbackFps, 12, 60);
         ImGui::SliderInt("Duration", &gifSettings.durationSeconds, 2, 10, "%d s");
         ImGui::SliderInt("Motion speed", &gifSettings.solverStepsPerFrame, 4, 60, "%d CFD steps/frame");
-        ImGui::SliderInt("Pre-roll", &gifSettings.warmupSteps, 0, 30000, "%d CFD steps");
-        if (ImGui::Button("Use current CFD step as pre-roll", ImVec2(-1.0f, 0.0f)))
-            gifSettings.warmupSteps = std::clamp(d.iteration, 0, 30000);
-        ImGui::TextDisabled("Playback speed is independent of the live simulator.");
-        const int regularEndStep = gifSettings.warmupSteps + gifSettings.playbackFps *
-                                   gifSettings.durationSeconds * gifSettings.solverStepsPerFrame;
-        ImGui::TextDisabled("Regular export range: CFD steps %d - %d", gifSettings.warmupSteps, regularEndStep);
-        ImGui::Text("Export fields (one synchronized GIF each)");
-        for (int field = 0; field < IM_ARRAYSIZE(fieldLabels); ++field) {
-            bool enabled = (gifSettings.fieldMask & (1u << field)) != 0;
-            if (ImGui::Checkbox(fieldLabels[field], &enabled)) {
-                if (enabled) gifSettings.fieldMask |= 1u << field;
-                else gifSettings.fieldMask &= ~(1u << field);
-            }
-            if ((field % 2) == 0 && field + 1 < IM_ARRAYSIZE(fieldLabels)) ImGui::SameLine(190.0f);
-        }
-        if (ImGui::Button("All fields")) gifSettings.fieldMask = (1u << IM_ARRAYSIZE(fieldLabels)) - 1u;
-        ImGui::SameLine();
-        if (ImGui::Button("Live field only")) gifSettings.fieldMask = 1u << static_cast<uint32_t>(view);
+        ImGui::TextDisabled("Live export starts at the current CFD step %d and runs on a copy.", d.iteration);
+        ImGui::TextDisabled("Playback speed does not change the live simulation.");
         if (exportStatus.running) {
             ImGui::ProgressBar(exportStatus.progress, ImVec2(-1.0f, 0.0f));
             ImGui::TextWrapped("%s", exportStatus.message.c_str());
         } else {
             ImGui::BeginDisabled(gifSettings.fieldMask == 0);
-            if (ImGui::Button("Simulate and export selected fields", ImVec2(-1.0f, 0.0f))) {
+            if (ImGui::Button("Export GIF from current state", ImVec2(-1.0f, 0.0f))) {
                 actions.exportGif = true;
                 actions.gifSettings = gifSettings;
             }

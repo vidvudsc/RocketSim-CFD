@@ -66,7 +66,9 @@ GifExportStatus GifExporter::status() const {
     return {running_.load(), progress_.load(), message_, outputPaths_};
 }
 
-bool GifExporter::start(const Parameters& parameters, GifExportSettings settings) {
+bool GifExporter::startFromCurrent(const FlowSolver& solver, const Parameters& parameters,
+                                   GifExportSettings settings) {
+    SolverSnapshot snapshot = solver.captureSnapshot();
     constexpr uint32_t allFieldsMask = (1u << 7u) - 1u;
     settings.fieldMask &= allFieldsMask;
     if (settings.fieldMask == 0) return false;
@@ -76,22 +78,18 @@ bool GifExporter::start(const Parameters& parameters, GifExportSettings settings
     settings.playbackFps = std::clamp(settings.playbackFps, 8, 60);
     settings.durationSeconds = std::clamp(settings.durationSeconds, 1, 12);
     settings.solverStepsPerFrame = std::clamp(settings.solverStepsPerFrame, 1, 80);
-    settings.warmupSteps = std::clamp(settings.warmupSteps, 0, 30000);
     progress_.store(0.0f);
-    setMessage("GPU-building a developed plume before capture...");
+    setMessage("Copying current CFD state for GIF export...");
 
-    worker_ = std::jthread([this, parameters, settings](std::stop_token stop) {
+    worker_ = std::jthread([this, parameters, settings, snapshot = std::move(snapshot)](std::stop_token stop) {
         HeadlessVulkanContext gpu;
-        FlowSolver exportSolver;
-        exportSolver.enableGpu(gpu.physicalDevice(), gpu.device(), gpu.queue(), gpu.queueFamily());
-        constexpr float warmupShare = 0.35f;
-        int warmed = 0;
-        while (warmed < settings.warmupSteps && !stop.stop_requested()) {
-            const int count = std::min(512, settings.warmupSteps - warmed);
-            exportSolver.advanceSteps(count, parameters);
-            warmed += count;
-            progress_.store(warmupShare * static_cast<float>(warmed) / std::max(settings.warmupSteps, 1));
+        FlowSolver exportSolver(snapshot.width, snapshot.height);
+        if (!exportSolver.restoreSnapshot(snapshot)) {
+            running_.store(false);
+            setMessage("Could not copy the current CFD state");
+            return;
         }
+        exportSolver.enableGpu(gpu.physicalDevice(), gpu.device(), gpu.queue(), gpu.queueFamily());
         if (stop.stop_requested()) {
             running_.store(false);
             setMessage("GIF export cancelled");
@@ -140,7 +138,6 @@ bool GifExporter::start(const Parameters& parameters, GifExportSettings settings
         setMessage("Rendering synchronized high-resolution GIFs...", paths);
         bool writeFailed = false;
         for (int frame = 0; frame < frameCount && !stop.stop_requested(); ++frame) {
-            exportSolver.advanceSteps(settings.solverStepsPerFrame, parameters);
             for (FieldOutput& output : outputs) {
                 for (int y = 0; y < height; ++y) {
                     for (int x = 0; x < width; ++x) {
@@ -157,7 +154,9 @@ bool GifExporter::start(const Parameters& parameters, GifExportSettings settings
                 }
             }
             if (writeFailed) break;
-            progress_.store(warmupShare + (1.0f - warmupShare) * static_cast<float>(frame + 1) / frameCount);
+            progress_.store(static_cast<float>(frame + 1) / frameCount);
+            if (frame + 1 < frameCount)
+                exportSolver.advanceSteps(settings.solverStepsPerFrame, parameters);
         }
         bool encodeFailed = false;
         for (FieldOutput& output : outputs) encodeFailed |= pclose(output.pipe) != 0;

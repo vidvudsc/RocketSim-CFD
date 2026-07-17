@@ -170,20 +170,17 @@ void FlowSolver::reset(const Parameters& p) {
     timeAccumulator_ = 0.0f;
     status_ = "Injector plenum charged; chamber and nozzle start at ambient conditions";
     updateDiagnostics();
-    if (gpu_) {
-        std::vector<float> packed(cells_.size() * 5);
-        std::vector<uint32_t> mask(fluidMask_.size());
-        for (size_t i = 0; i < cells_.size(); ++i) {
-            packed[i*5]=cells_[i].rho; packed[i*5+1]=cells_[i].mx; packed[i*5+2]=cells_[i].my;
-            packed[i*5+3]=cells_[i].energy; packed[i*5+4]=cells_[i].exhaust; mask[i]=fluidMask_[i];
-        }
-        gpu_->upload(packed, mask);
-    }
+    if (gpu_) uploadGpuState();
 }
 
 void FlowSolver::enableGpu(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, uint32_t queueFamily) {
     gpu_ = std::make_unique<VulkanFlowBackend>(physicalDevice, device, queue, queueFamily,
                                                width_, height_, dx_, dy_, xMin_, yMin_);
+    uploadGpuState();
+    status_ = "Axisymmetric Vulkan compute solver active";
+}
+
+void FlowSolver::uploadGpuState() {
     std::vector<float> packed(cells_.size() * 5);
     std::vector<uint32_t> mask(fluidMask_.size());
     for (size_t i = 0; i < cells_.size(); ++i) {
@@ -191,10 +188,48 @@ void FlowSolver::enableGpu(VkPhysicalDevice physicalDevice, VkDevice device, VkQ
         packed[i*5+3]=cells_[i].energy; packed[i*5+4]=cells_[i].exhaust; mask[i]=fluidMask_[i];
     }
     gpu_->upload(packed, mask);
-    status_ = "Axisymmetric Vulkan compute solver active";
 }
 
 void FlowSolver::disableGpu() { gpu_.reset(); }
+
+SolverSnapshot FlowSolver::captureSnapshot() const {
+    SolverSnapshot snapshot;
+    snapshot.width = width_;
+    snapshot.height = height_;
+    snapshot.parameters = activeParameters_;
+    snapshot.diagnostics = diagnostics_;
+    snapshot.fluidMask = fluidMask_;
+    snapshot.conserved.resize(cells_.size() * 5);
+    for (size_t i = 0; i < cells_.size(); ++i) {
+        snapshot.conserved[i*5] = cells_[i].rho;
+        snapshot.conserved[i*5+1] = cells_[i].mx;
+        snapshot.conserved[i*5+2] = cells_[i].my;
+        snapshot.conserved[i*5+3] = cells_[i].energy;
+        snapshot.conserved[i*5+4] = cells_[i].exhaust;
+    }
+    return snapshot;
+}
+
+bool FlowSolver::restoreSnapshot(const SolverSnapshot& snapshot) {
+    if (snapshot.width != width_ || snapshot.height != height_ ||
+        snapshot.conserved.size() != cells_.size() * 5 ||
+        snapshot.fluidMask.size() != cells_.size()) return false;
+    activeParameters_ = snapshot.parameters;
+    diagnostics_ = snapshot.diagnostics;
+    fluidMask_ = snapshot.fluidMask;
+    for (size_t i = 0; i < cells_.size(); ++i) {
+        cells_[i] = {snapshot.conserved[i*5], snapshot.conserved[i*5+1],
+                     snapshot.conserved[i*5+2], snapshot.conserved[i*5+3],
+                     snapshot.conserved[i*5+4]};
+    }
+    next_ = cells_;
+    stageBase_ = cells_;
+    timeAccumulator_ = 0.0f;
+    rebuildPrimitiveCache();
+    if (gpu_) uploadGpuState();
+    status_ = "Restored current CFD state for export";
+    return true;
+}
 
 void FlowSolver::advanceGpuSteps(int count, const Parameters& parameters) {
     activeParameters_ = parameters;

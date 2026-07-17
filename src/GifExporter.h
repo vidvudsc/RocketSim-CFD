@@ -13,7 +13,6 @@ namespace rocket {
 
 struct GifExportSettings {
     int playbackFps = 30;
-    int durationSeconds = 4;
     int solverStepsPerFrame = 20;
     uint32_t fieldMask = (1u << static_cast<uint32_t>(FieldView::Schlieren)) |
                          (1u << static_cast<uint32_t>(FieldView::Mach));
@@ -33,7 +32,7 @@ public:
     GifExporter(const GifExporter&) = delete;
     GifExporter& operator=(const GifExporter&) = delete;
 
-    bool startFromCurrent(const FlowSolver& solver, const Parameters& parameters, GifExportSettings settings);
+    bool startFromPast(const SolverSnapshot& snapshot, int endIteration, GifExportSettings settings);
     bool startFromBake(std::shared_ptr<const BakeResult> bake, GifExportSettings settings,
                        int startFrame, int endFrame);
     [[nodiscard]] GifExportStatus status() const;

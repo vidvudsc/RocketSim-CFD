@@ -66,9 +66,9 @@ GifExportStatus GifExporter::status() const {
     return {running_.load(), progress_.load(), message_, outputPaths_};
 }
 
-bool GifExporter::startFromCurrent(const FlowSolver& solver, const Parameters& parameters,
-                                   GifExportSettings settings) {
-    SolverSnapshot snapshot = solver.captureSnapshot();
+bool GifExporter::startFromPast(const SolverSnapshot& source, int endIteration,
+                                GifExportSettings settings) {
+    SolverSnapshot snapshot = source;
     constexpr uint32_t allFieldsMask = (1u << 7u) - 1u;
     settings.fieldMask &= allFieldsMask;
     if (settings.fieldMask == 0) return false;
@@ -76,12 +76,12 @@ bool GifExporter::startFromCurrent(const FlowSolver& solver, const Parameters& p
     if (worker_.joinable()) worker_.join();
 
     settings.playbackFps = std::clamp(settings.playbackFps, 8, 60);
-    settings.durationSeconds = std::clamp(settings.durationSeconds, 1, 12);
     settings.solverStepsPerFrame = std::clamp(settings.solverStepsPerFrame, 1, 80);
+    endIteration = std::max(endIteration, snapshot.diagnostics.iteration);
     progress_.store(0.0f);
-    setMessage("Copying current CFD state for GIF export...");
+    setMessage("Replaying selected live history for GIF export...");
 
-    worker_ = std::jthread([this, parameters, settings, snapshot = std::move(snapshot)](std::stop_token stop) {
+    worker_ = std::jthread([this, settings, endIteration, snapshot = std::move(snapshot)](std::stop_token stop) {
         HeadlessVulkanContext gpu;
         FlowSolver exportSolver(snapshot.width, snapshot.height);
         if (!exportSolver.restoreSnapshot(snapshot)) {
@@ -103,7 +103,9 @@ bool GifExporter::startFromCurrent(const FlowSolver& solver, const Parameters& p
                                   (exportSolver.worldYMax() - exportSolver.worldYMin());
         constexpr int outputWidth = 1536;
         const int outputHeight = std::max(64, static_cast<int>(std::round(outputWidth / worldAspect)));
-        const int frameCount = settings.playbackFps * settings.durationSeconds;
+        const int stepRange = endIteration - snapshot.diagnostics.iteration;
+        const int frameCount = std::max(1, (stepRange + settings.solverStepsPerFrame - 1) /
+                                             settings.solverStepsPerFrame + 1);
 
         struct FieldOutput {
             FieldView view;
@@ -155,8 +157,10 @@ bool GifExporter::startFromCurrent(const FlowSolver& solver, const Parameters& p
             }
             if (writeFailed) break;
             progress_.store(static_cast<float>(frame + 1) / frameCount);
-            if (frame + 1 < frameCount)
-                exportSolver.advanceSteps(settings.solverStepsPerFrame, parameters);
+            if (frame + 1 < frameCount) {
+                const int remaining = endIteration - exportSolver.diagnostics().iteration;
+                exportSolver.advanceSteps(std::min(settings.solverStepsPerFrame, remaining), snapshot.parameters);
+            }
         }
         bool encodeFailed = false;
         for (FieldOutput& output : outputs) encodeFailed |= pclose(output.pipe) != 0;

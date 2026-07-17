@@ -12,11 +12,11 @@ int main() {
     currentSolver.advanceSteps(12, parameters);
     rocket::GifExportSettings settings;
     settings.playbackFps = 8;
-    settings.durationSeconds = 1;
     settings.solverStepsPerFrame = 12;
     settings.fieldMask = (1u << static_cast<uint32_t>(rocket::FieldView::Schlieren)) |
                          (1u << static_cast<uint32_t>(rocket::FieldView::Mach));
-    if (!exporter.startFromCurrent(currentSolver, parameters, settings)) return 1;
+    const rocket::SolverSnapshot start = currentSolver.captureSnapshot();
+    if (!exporter.startFromPast(start, start.diagnostics.iteration + 48, settings)) return 1;
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     rocket::GifExportStatus status;

@@ -24,6 +24,9 @@
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <algorithm>
+#include <deque>
+#include <vector>
 
 // Volk headers
 #ifdef IMGUI_IMPL_VULKAN_USE_VOLK
@@ -444,6 +447,22 @@ int main(int, char**)
     rocket::GifExporter gifExporter;
     rocket::BakeManager bakeManager;
     rocket::FieldView fieldView = rocket::FieldView::Schlieren;
+    std::deque<rocket::SolverSnapshot> liveHistory;
+    constexpr int historyCaptureInterval = 120;
+    constexpr size_t maximumHistoryFrames = 48;
+    rocket::Parameters historyParameters = parameters;
+    auto sameParameters = [](const rocket::Parameters& a, const rocket::Parameters& b) {
+        return a.chamberPressureMPa == b.chamberPressureMPa &&
+               a.chamberTemperatureK == b.chamberTemperatureK &&
+               a.ambientPressureKPa == b.ambientPressureKPa &&
+               a.ambientTemperatureK == b.ambientTemperatureK && a.gamma == b.gamma &&
+               a.molarMassGPerMol == b.molarMassGPerMol && a.chamberRadiusM == b.chamberRadiusM &&
+               a.throatRadiusM == b.throatRadiusM && a.exitRadiusM == b.exitRadiusM &&
+               a.chamberLengthM == b.chamberLengthM && a.convergingLengthM == b.convergingLengthM &&
+               a.divergingLengthM == b.divergingLengthM && a.cfl == b.cfl &&
+               a.timeScale == b.timeScale;
+    };
+    liveHistory.push_back(solver.captureSnapshot());
     ImVec4 clear_color = ImVec4(0.01f, 0.015f, 0.024f, 1.00f);
     double previousTime = glfwGetTime();
 
@@ -481,20 +500,44 @@ int main(int, char**)
         const double now = glfwGetTime();
         const float frameDelta = static_cast<float>(now - previousTime);
         previousTime = now;
+        const bool parametersChanged = !sameParameters(parameters, historyParameters);
         solver.step(frameDelta, parameters);
+        if (parametersChanged) {
+            liveHistory.clear();
+            historyParameters = parameters;
+        }
+        if (liveHistory.empty() || solver.diagnostics().iteration -
+                                   liveHistory.back().diagnostics.iteration >= historyCaptureInterval) {
+            liveHistory.push_back(solver.captureSnapshot());
+            if (liveHistory.size() > maximumHistoryFrames) liveHistory.pop_front();
+        }
+        std::vector<int> liveHistorySteps;
+        liveHistorySteps.reserve(liveHistory.size());
+        for (const rocket::SolverSnapshot& snapshot : liveHistory)
+            liveHistorySteps.push_back(snapshot.diagnostics.iteration);
         flowTexture->update(solver, fieldView);
         const rocket::UiActions actions = rocket::drawSimulationUi(solver, parameters, fieldView,
                                                                     gifExporter.status(), bakeManager.status(),
-                                                                    flowTexture->textureId());
-        if (actions.reset || actions.geometryChanged)
+                                                                    flowTexture->textureId(), liveHistorySteps);
+        if (actions.reset || actions.geometryChanged) {
             solver.reset(parameters);
+            liveHistory.clear();
+            liveHistory.push_back(solver.captureSnapshot());
+            historyParameters = parameters;
+        }
         if (actions.singleStep)
             solver.singleStep(parameters);
         if (actions.developPlume)
             solver.advanceSteps(5000, parameters);
         if (actions.exportGif) {
             solver.setPaused(true);
-            gifExporter.startFromCurrent(solver, parameters, actions.gifSettings);
+            const int start = std::clamp(actions.historyStartFrame, 0,
+                                         static_cast<int>(liveHistory.size()) - 1);
+            const int end = std::clamp(actions.historyEndFrame, start,
+                                       static_cast<int>(liveHistory.size()) - 1);
+            gifExporter.startFromPast(liveHistory[static_cast<size_t>(start)],
+                                      liveHistory[static_cast<size_t>(end)].diagnostics.iteration,
+                                      actions.gifSettings);
         }
         if (actions.startBake) {
             solver.setPaused(true);

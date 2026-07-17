@@ -113,7 +113,7 @@ void applyTheme(float scale) {
 
 UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
                            const GifExportStatus& exportStatus, const BakeStatus& bakeStatus,
-                           ImTextureID liveFieldTexture) {
+                           ImTextureID liveFieldTexture, const std::vector<int>& liveHistorySteps) {
     UiActions actions;
     static GifExportSettings gifSettings;
     static BakeSettings bakeSettings;
@@ -124,9 +124,24 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
     static int bakedFrame = 0;
     static int bakedStartFrame = 0;
     static int bakedEndFrame = 0;
+    static int historyStartFrame = 0;
+    static int historyEndFrame = 0;
+    static int firstHistoryStep = -1;
+    static int historySize = 0;
     static FieldView bakedView = FieldView::Mach;
     static const BakeResult* lastBake = nullptr;
     static const char* fieldLabels[] = {"Schlieren", "Temperature", "Mach number", "Pressure", "Density", "Exhaust fraction", "Velocity"};
+    if (!liveHistorySteps.empty()) {
+        const int newSize = static_cast<int>(liveHistorySteps.size());
+        if (firstHistoryStep != liveHistorySteps.front()) {
+            firstHistoryStep = liveHistorySteps.front();
+            historyStartFrame = 0;
+            historyEndFrame = newSize - 1;
+        } else if (newSize != historySize && historyEndFrame >= historySize - 1) {
+            historyEndFrame = newSize - 1;
+        }
+        historySize = newSize;
+    }
     if (bakeStatus.result && bakeStatus.result.get() != lastBake) {
         lastBake = bakeStatus.result.get();
         bakedFrame = 0;
@@ -393,23 +408,38 @@ UiActions drawSimulationUi(FlowSolver& solver, Parameters& p, FieldView& view,
             rangeSliderInt("GIF export range", &bakedStartFrame, &bakedEndFrame,
                            bakeStatus.result->frameCount - 1);
             ImGui::TextDisabled("Mouse wheel over the viewport also scrubs frames.");
+            ImGui::TextDisabled("Viewport proxy: %d x %d. GIF export uses the full lossless bake cache.",
+                                bakeStatus.result->previewWidth, bakeStatus.result->previewHeight);
         }
     }
 
     if (ImGui::CollapsingHeader("GIF export")) {
         ImGui::SliderInt("Playback FPS", &gifSettings.playbackFps, 12, 60);
-        ImGui::SliderInt("Duration", &gifSettings.durationSeconds, 2, 10, "%d s");
         ImGui::SliderInt("Motion speed", &gifSettings.solverStepsPerFrame, 4, 60, "%d CFD steps/frame");
-        ImGui::TextDisabled("Live export starts at the current CFD step %d and runs on a copy.", d.iteration);
-        ImGui::TextDisabled("Playback speed does not change the live simulation.");
+        if (liveHistorySteps.size() >= 2) {
+            rangeSliderInt("Recorded live range", &historyStartFrame, &historyEndFrame,
+                           static_cast<int>(liveHistorySteps.size()) - 1);
+            const int firstStep = liveHistorySteps[static_cast<size_t>(historyStartFrame)];
+            const int lastStep = liveHistorySteps[static_cast<size_t>(historyEndFrame)];
+            const int frames = std::max(1, (lastStep - firstStep + gifSettings.solverStepsPerFrame - 1) /
+                                               gifSettings.solverStepsPerFrame + 1);
+            ImGui::TextDisabled("CFD steps %d - %d | about %.2f seconds", firstStep, lastStep,
+                                static_cast<float>(frames) / gifSettings.playbackFps);
+        } else {
+            ImGui::TextDisabled("Run the simulation to build a rolling past timeline.");
+        }
+        ImGui::TextDisabled("The replay runs on a copy; the live simulation is unchanged.");
         if (exportStatus.running) {
             ImGui::ProgressBar(exportStatus.progress, ImVec2(-1.0f, 0.0f));
             ImGui::TextWrapped("%s", exportStatus.message.c_str());
         } else {
-            ImGui::BeginDisabled(gifSettings.fieldMask == 0);
-            if (ImGui::Button("Export GIF from current state", ImVec2(-1.0f, 0.0f))) {
+            ImGui::BeginDisabled(gifSettings.fieldMask == 0 || liveHistorySteps.size() < 2 ||
+                                 historyStartFrame >= historyEndFrame);
+            if (ImGui::Button("Export selected past range", ImVec2(-1.0f, 0.0f))) {
                 actions.exportGif = true;
                 actions.gifSettings = gifSettings;
+                actions.historyStartFrame = historyStartFrame;
+                actions.historyEndFrame = historyEndFrame;
             }
             ImGui::EndDisabled();
             if (bakeStatus.result) {
